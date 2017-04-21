@@ -123,6 +123,11 @@ func (bpf *Module) Close() {
 	}
 }
 
+// LoadNet loads a program of type BPF_PROG_TYPE_SCHED_CLS.
+func (bpf *Module) LoadTcFilter(name string) (int, error) {
+	return bpf.Load(name, C.BPF_PROG_TYPE_SCHED_CLS)
+}
+
 // LoadNet loads a program of type BPF_PROG_TYPE_SCHED_ACT.
 func (bpf *Module) LoadNet(name string) (int, error) {
 	return bpf.Load(name, C.BPF_PROG_TYPE_SCHED_ACT)
