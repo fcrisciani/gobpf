@@ -123,7 +123,10 @@ func InitPerfMap(table *Table, receiverChan chan []byte) (*PerfMap, error) {
 	cpu := 0
 	res := 0
 	for res == 0 {
-		reader, err := C.bpf_open_perf_buffer((C.perf_reader_raw_cb)(unsafe.Pointer(C.callback_to_go)), unsafe.Pointer(uintptr(callbackDataIndex)), -1, C.int(cpu), BPF_PERF_READER_PAGE_CNT)
+		reader, err := C.bpf_open_perf_buffer((C.perf_reader_raw_cb)(unsafe.Pointer(C.callback_to_go)),
+			(C.perf_reader_lost_cb)(unsafe.Pointer(C.callback_to_go)),
+			unsafe.Pointer(uintptr(callbackDataIndex)),
+			-1, C.int(cpu), BPF_PERF_READER_PAGE_CNT)
 		if reader == nil {
 			return nil, fmt.Errorf("failed to open perf buffer: %v", err)
 		}

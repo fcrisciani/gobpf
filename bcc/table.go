@@ -149,6 +149,31 @@ func (table *Table) Set(keyStr, leafStr string) error {
 	return nil
 }
 
+func (table *Table) SetBytes(keyBytes, leafBytes []byte) error {
+	if table == nil || table.module.p == nil {
+		panic("table is nil")
+	}
+	fd := C.bpf_table_fd_id(table.module.p, table.id)
+	mod := table.module.p
+	keySize := C.bpf_table_key_size_id(mod, table.id)
+	if len(keyBytes) > int(keySize) {
+		return fmt.Errorf("Table.SetBytes: key passed is bigger than the table key size (%d > %d)", len(keyBytes), keySize)
+	}
+
+	leafSize := C.bpf_table_leaf_size_id(mod, table.id)
+	if len(leafBytes) > int(leafSize) {
+		return fmt.Errorf("Table.SetBytes: leaf passed is bigger than the table leaf size (%d > %d)", len(leafBytes), leafSize)
+	}
+
+	keyP := unsafe.Pointer(&keyBytes[0])
+	leafP := unsafe.Pointer(&leafBytes[0])
+	r, err := C.bpf_update_elem(fd, keyP, leafP, 0)
+	if r != 0 {
+		return fmt.Errorf("Table.Set: unable to update element (%v=%v): %v", keyBytes, leafBytes, err)
+	}
+	return nil
+}
+
 // Delete a key.
 func (table *Table) Delete(keyStr string) error {
 	fd := C.bpf_table_fd_id(table.module.p, table.id)

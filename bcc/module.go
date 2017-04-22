@@ -123,7 +123,7 @@ func (bpf *Module) Close() {
 	}
 }
 
-// LoadNet loads a program of type BPF_PROG_TYPE_SCHED_CLS.
+// LoadTcFilter loads a program of type BPF_PROG_TYPE_SCHED_CLS.
 func (bpf *Module) LoadTcFilter(name string) (int, error) {
 	return bpf.Load(name, C.BPF_PROG_TYPE_SCHED_CLS)
 }
@@ -148,6 +148,7 @@ func (bpf *Module) Load(name string, progType int) (int, error) {
 	if err != nil {
 		return -1, err
 	}
+
 	bpf.funcs[name] = fd
 	return fd, nil
 }
