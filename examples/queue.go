@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -17,13 +18,13 @@ const source string = `
 #include <bcc/proto.h>
 
 struct hdr_key {
-  u32 mac;
+  u64 mac;
 };
 
-// BPF_HASH(mac2if, struct hdr_key, int);
+BPF_HASH(mac2if, struct hdr_key, int);
 // BPF_HASH(mac2if, u32, u32);
 // BPF_HASH(conf, int, struct hdr_key, 1);
-BPF_HASH(conf, int, int, 1);
+// BPF_HASH(conf, int, int, 1);
 
 int handle_ingress(struct __sk_buff *skb) {
   bpf_trace_printk("ingress");
@@ -46,12 +47,8 @@ int handle_egress(struct __sk_buff *skb) {
   struct ethernet_t *ethernet = cursor_advance(cursor, sizeof(*ethernet));
 
   bpf_trace_printk("egress got packet from %x to %x\n", ethernet->src, ethernet->dst);
-	// struct hdr_key vk = {13};
-	int vk = 0;
-	// int* v = mac2if.lookup(&vk);
-	int one = 1;
-  // struct hdr_key *v = conf.lookup(&one);
-  int *v = conf.lookup(&one);
+	struct hdr_key vk = {ethernet->dst};
+	int* v = mac2if.lookup(&vk);
 	if (v) {
 		bpf_trace_printk("egress lookup GOOD send to %d\n", *v);
 		bpf_clone_redirect(skb, *v, 0/*ingress*/);
@@ -64,11 +61,37 @@ int handle_egress(struct __sk_buff *skb) {
 }
 `
 
+func mac2Key(macStr string) []byte {
+	mac, err := net.ParseMAC(macStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to parse mac %s", err)
+		return nil
+	}
+	mm := make([]byte, 8)
+	for i := 0; i < 6; i++ {
+		mm[i] = mac[5-i]
+	}
+	return mm
+}
+
+func insertMacEntry(t *bpf.Table, mac string, ifIndex int) error {
+	vmMacKey := mac2Key(mac)
+	vmIfIndex := ifIndex
+	vmLeaf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(vmLeaf, uint32(vmIfIndex))
+	err := t.SetBytes(vmMacKey, vmLeaf)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed insert key %s\n", err)
+		return err
+	}
+	return nil
+}
+
 func main() {
 	b := bpf.NewModule(source, []string{})
 	defer b.Close()
 
-	table := bpf.NewTable(b.TableId("conf"), b)
+	table := bpf.NewTable(b.TableId("mac2if"), b)
 
 	// fallbackLink, err := netlink.LinkByName("eth0")
 	// if err != nil {
@@ -78,23 +101,27 @@ func main() {
 	// zero := byte{0}
 	// table.Set(string(0), fallbackLink.Attrs().Index)
 
-	// mac, err := net.ParseMAC("5e:7c:60:3e:ab:5d")
-	// if err != nil {
-	// 	fmt.Fprintf(os.Stderr, "Failed to parse mac %s", err)
-	// 	os.Exit(1)
-	// }
-
-	index := 1
-	bs := make([]byte, 4)
-	x := make([]byte, 4)
-	binary.LittleEndian.PutUint32(bs, uint32(index))
-	binary.BigEndian.PutUint32(x, uint32(index))
-
-	err := table.Set("1", "13")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed insert key %s\n", err)
+	if insertMacEntry(table, "66:42:e6:da:fd:9b", 11) != nil {
+		fmt.Fprintf(os.Stderr, "Failed insert entry vm1\n")
 		os.Exit(1)
 	}
+	if insertMacEntry(table, "5e:7c:60:3e:ab:5d", 13) != nil {
+		fmt.Fprintf(os.Stderr, "Failed insert entry vm2\n")
+		os.Exit(1)
+	}
+
+	// buf := new(bytes.Buffer)
+	// err = binary.Write(buf, binary.BigEndian, mac)
+	// macFlip := new(bytes.Buffer)
+	// binary.Write(macFlip, binary.LittleEndian, mac)
+	// fmt.Fprintf(os.Stderr, "Little endian: %p\n", macFlip)
+	// macFlip = new(bytes.Buffer)
+	// binary.Write(macFlip, binary.BigEndian, mac)
+	// fmt.Fprintf(os.Stderr, "Big endian: %p\n", macFlip)
+	// if err != nil {
+	// 	fmt.Fprintf(os.Stderr, "UPS in binary %s\n", err)
+	// 	os.Exit(1)
+	// }
 
 	ch := table.Iter()
 	for elem := range ch {
@@ -112,46 +139,81 @@ func main() {
 		os.Exit(1)
 	}
 
-	link, err := netlink.LinkByName("veth2")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get the link for ifc veth2 %s\n", err)
-		os.Exit(1)
-	}
+	// link, err := netlink.LinkByName("veth2")
+	// if err != nil {
+	// 	fmt.Fprintf(os.Stderr, "Failed to get the link for ifc veth2 %s\n", err)
+	// 	os.Exit(1)
+	// }
 
-	attrs := netlink.QdiscAttrs{
-		LinkIndex: link.Attrs().Index,
+	attrs1 := netlink.QdiscAttrs{
+		LinkIndex: 11,
 		Handle:    netlink.MakeHandle(0xffff, 0),
 		Parent:    netlink.HANDLE_CLSACT,
 	}
-	qdisc := &netlink.GenericQdisc{
-		QdiscAttrs: attrs,
+	qdisc1 := &netlink.GenericQdisc{
+		QdiscAttrs: attrs1,
 		QdiscType:  "ingress",
 	}
 	// This feature was added in kernel 4.5
-	if err := netlink.QdiscAdd(qdisc); err != nil {
+	if err := netlink.QdiscAdd(qdisc1); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed adding clsact qdisc, unsupported kernel\n")
 		os.Exit(1)
 	}
-	defer netlink.QdiscDel(qdisc)
+	defer netlink.QdiscDel(qdisc1)
 
-	filterattrs := netlink.FilterAttrs{
-		LinkIndex: link.Attrs().Index,
+	filterattrs1 := netlink.FilterAttrs{
+		LinkIndex: 11,
 		Parent:    netlink.HANDLE_MIN_EGRESS,
 		Handle:    netlink.MakeHandle(0, 1),
 		Protocol:  syscall.ETH_P_ALL,
 		Priority:  1,
 	}
-	filter := &netlink.BpfFilter{
-		FilterAttrs:  filterattrs,
+	filter1 := &netlink.BpfFilter{
+		FilterAttrs:  filterattrs1,
 		Fd:           fd,
 		Name:         "handle_egress",
 		DirectAction: true,
 	}
-	if err := netlink.FilterAdd(filter); err != nil {
+	if err := netlink.FilterAdd(filter1); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load the filter %s\n", err)
 		os.Exit(1)
 	}
-	defer netlink.FilterDel(filter)
+	defer netlink.FilterDel(filter1)
+
+	attrs2 := netlink.QdiscAttrs{
+		LinkIndex: 13,
+		Handle:    netlink.MakeHandle(0xffff, 0),
+		Parent:    netlink.HANDLE_CLSACT,
+	}
+	qdisc2 := &netlink.GenericQdisc{
+		QdiscAttrs: attrs2,
+		QdiscType:  "ingress",
+	}
+	// This feature was added in kernel 4.5
+	if err := netlink.QdiscAdd(qdisc2); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed adding clsact qdisc, unsupported kernel\n")
+		os.Exit(1)
+	}
+	defer netlink.QdiscDel(qdisc2)
+
+	filterattrs2 := netlink.FilterAttrs{
+		LinkIndex: 13,
+		Parent:    netlink.HANDLE_MIN_EGRESS,
+		Handle:    netlink.MakeHandle(0, 1),
+		Protocol:  syscall.ETH_P_ALL,
+		Priority:  1,
+	}
+	filter2 := &netlink.BpfFilter{
+		FilterAttrs:  filterattrs2,
+		Fd:           fd,
+		Name:         "handle_egress",
+		DirectAction: true,
+	}
+	if err := netlink.FilterAdd(filter2); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load the filter %s\n", err)
+		os.Exit(1)
+	}
+	defer netlink.FilterDel(filter2)
 
 	fmt.Fprintf(os.Stderr, "GO GO GO\n\n")
 
