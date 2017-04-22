@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"os"
 	"os/signal"
@@ -13,53 +14,6 @@ import (
 )
 
 import "C"
-
-const source string = `
-#include <bcc/proto.h>
-
-struct hdr_key {
-  u64 mac;
-};
-
-BPF_HASH(mac2if, struct hdr_key, int);
-// BPF_HASH(mac2if, u32, u32);
-// BPF_HASH(conf, int, struct hdr_key, 1);
-// BPF_HASH(conf, int, int, 1);
-
-int handle_ingress(struct __sk_buff *skb) {
-  bpf_trace_printk("ingress");
-  u8 *cursor = 0;
-  struct ethernet_t *ethernet = cursor_advance(cursor, sizeof(*ethernet));
-
-  bpf_trace_printk("ingress got packet from =%x\n", ethernet->src);
-  bpf_clone_redirect(skb, 150, 1/*ingress*/);
-  // int* v = mac2if.lookup(ethernet->src);
-  //
-  // if (v) {
-  //   lock_xadd(*v, 1);
-  // }
-  return 1;
-}
-
-int handle_egress(struct __sk_buff *skb) {
-  bpf_trace_printk("egress");
-  u8 *cursor = 0;
-  struct ethernet_t *ethernet = cursor_advance(cursor, sizeof(*ethernet));
-
-  bpf_trace_printk("egress got packet from %x to %x\n", ethernet->src, ethernet->dst);
-	struct hdr_key vk = {ethernet->dst};
-	int* v = mac2if.lookup(&vk);
-	if (v) {
-		bpf_trace_printk("egress lookup GOOD send to %d\n", *v);
-		bpf_clone_redirect(skb, *v, 0/*ingress*/);
-	} else {
-		bpf_trace_printk("egress lookup FAILED send to 2\n");
-		bpf_clone_redirect(skb, 2, 0/*ingress*/);
-	}
-
-  return 1;
-}
-`
 
 func mac2Key(macStr string) []byte {
 	mac, err := net.ParseMAC(macStr)
@@ -74,12 +28,38 @@ func mac2Key(macStr string) []byte {
 	return mm
 }
 
+func ip2Key(ipStr string) []byte {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		fmt.Fprintf(os.Stderr, "Failed to parse IP")
+		return nil
+	}
+
+	mm := make([]byte, 4)
+	for i := 0; i < 4; i++ {
+		mm[i] = ip[15-i]
+	}
+	return mm
+}
+
 func insertMacEntry(t *bpf.Table, mac string, ifIndex int) error {
-	vmMacKey := mac2Key(mac)
-	vmIfIndex := ifIndex
-	vmLeaf := make([]byte, 4)
-	binary.LittleEndian.PutUint32(vmLeaf, uint32(vmIfIndex))
-	err := t.SetBytes(vmMacKey, vmLeaf)
+	macKey := mac2Key(mac)
+	ifIndexTmp := ifIndex
+	ifLeaf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(ifLeaf, uint32(ifIndexTmp))
+	err := t.SetBytes(macKey, ifLeaf)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed insert key %s\n", err)
+		return err
+	}
+	return nil
+}
+
+func insertIPEntry(t *bpf.Table, ip, mac string) error {
+	ipKey := ip2Key(ip)
+	fmt.Fprintf(os.Stderr, "Ip key is %x\n", ipKey)
+	macLeaf := mac2Key(mac)
+	err := t.SetBytes(ipKey, macLeaf)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed insert key %s\n", err)
 		return err
@@ -88,25 +68,32 @@ func insertMacEntry(t *bpf.Table, mac string, ifIndex int) error {
 }
 
 func main() {
-	b := bpf.NewModule(source, []string{})
+	source, err := ioutil.ReadFile("./bpf_switch.c")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to read the source file %s\n", err)
+		os.Exit(1)
+	}
+
+	b := bpf.NewModule(string(source), []string{})
 	defer b.Close()
 
-	table := bpf.NewTable(b.TableId("mac2if"), b)
+	mac2if := bpf.NewTable(b.TableId("mac2if"), b)
+	ip2mac := bpf.NewTable(b.TableId("ip2mac"), b)
 
-	// fallbackLink, err := netlink.LinkByName("eth0")
-	// if err != nil {
-	// 	fmt.Fprintf(os.Stderr, "Failed to get the link for ifc eth0 %s", err)
-	// 	os.Exit(1)
-	// }
-	// zero := byte{0}
-	// table.Set(string(0), fallbackLink.Attrs().Index)
-
-	if insertMacEntry(table, "66:42:e6:da:fd:9b", 11) != nil {
+	if insertMacEntry(mac2if, "66:42:e6:da:fd:9b", 11) != nil {
 		fmt.Fprintf(os.Stderr, "Failed insert entry vm1\n")
 		os.Exit(1)
 	}
-	if insertMacEntry(table, "5e:7c:60:3e:ab:5d", 13) != nil {
+	if insertMacEntry(mac2if, "5e:7c:60:3e:ab:5d", 13) != nil {
 		fmt.Fprintf(os.Stderr, "Failed insert entry vm2\n")
+		os.Exit(1)
+	}
+	if insertIPEntry(ip2mac, "10.0.0.1", "66:42:e6:da:fd:9b") != nil {
+		fmt.Fprintf(os.Stderr, "Failed insert IP entry vm1\n")
+		os.Exit(1)
+	}
+	if insertIPEntry(ip2mac, "10.0.0.2", "5e:7c:60:3e:ab:5d") != nil {
+		fmt.Fprintf(os.Stderr, "Failed insert IP entry vm2\n")
 		os.Exit(1)
 	}
 
@@ -123,7 +110,12 @@ func main() {
 	// 	os.Exit(1)
 	// }
 
-	ch := table.Iter()
+	ch := mac2if.Iter()
+	for elem := range ch {
+		fmt.Printf("%s --> %s\n", elem.Key, elem.Value)
+	}
+
+	ch = ip2mac.Iter()
 	for elem := range ch {
 		fmt.Printf("%s --> %s\n", elem.Key, elem.Value)
 	}
